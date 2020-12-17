@@ -1,0 +1,471 @@
+---
+title: "Neruon_Clustering_Downstream1"
+author: "Paul van Lent"
+date: "10 December 2020"
+output: html_document
+---
+#Packages
+```{r}
+library(monocle3)
+library(textshape)
+library(reshape2)
+library("ggdendro")
+library(gridExtra)
+library(tidyverse)
+```
+
+
+#Load data, UMAP, Some plots
+```{r}
+cds<-readRDS("cds_sct.rds")
+neurons<- readRDS("data/neuron_cds.rds")
+
+
+#Required step: no PCA, no Normalization
+cds<- monocle3::preprocess_cds(cds,method=NULL, norm_method="none", scaling=FALSE) #This is a mandatory step, but when we set num_dim to 221 we just that contains all information
+
+cds<- monocle3::reduce_dimension(cds, reduction_method="UMAP", max_components = 2, umap.min_dist=0.2, umap.n_neighbors = 75)
+cds<- monocle3::cluster_cells(cds,resolution=1e-3, k=18)
+
+#Plot
+plot_cells(cds, color_cells_by="Neuron.type",label_groups_by_cluster = TRUE)
+#Partitions of the clusters can be helpful
+pData(cds)$partition<- partitions(cds)
+pData(cds)$clusters<- clusters(cds)
+
+
+#UMAP plots
+#p1<-plot_cells(cds, label_groups_by_cluster = TRUE)
+#p2<-plot_cells(cds, color_cells_by = "Neuron.type", label_groups_by_cluster = FALSE)
+p1<-plot_cells(cds, color_cells_by  = "Neuron.type", label_groups_by_cluster = TRUE)
+plot_cells(cds, color_cells_by  = "partition", label_groups_by_cluster = FALSE)
+p2<-plot_cells(cds, color_cells_by  = "cluster", label_groups_by_cluster = FALSE)
+p3<-plot_cells(cds, color_cells_by  = "partition", label_groups_by_cluster = FALSE, group_label_size = 3)
+
+
+#Thesis:
+p1<-p1+labs(tag="A")
+p2<-p2+labs(tag="B")
+
+
+```
+
+#Their UMAP plot and our partitions (SI)
+```{r}
+
+#Required to first run Louvain clustering
+UMAP1<- neurons$UMAP_1
+UMAP2<- neurons$UMAP_2
+ggplot()+geom_point(mapping=aes(x=UMAP1, y=UMAP2, col=pData(cds)$partition), size=0.5)+theme_classic()
+```
+
+#Differential expression
+```{r}
+library(monocle3)
+gene_fits <- fit_models(cds, model_formula_str = "~Neuron.type")
+
+
+
+#Coefficient tables, remove intercept term as we are not really interested in this. Monocle provides a q-value for the coefficients 
+fit_coefs <- coefficient_table(gene_fits)
+fit_coefs<- fit_coefs %>% filter(term != "(Intercept)")
+
+DE_modules<-fit_coefs %>% filter (q_value < 0.05) 
+DE_modules<-unique(DE_modules$gene_short_name)
+#Skip the steps above as I saved the instances
+
+
+
+#save the Differentially expressed modules, as this step takes some time
+write.csv(DE_modules,"DE_modules.csv")
+
+
+```
+
+
+#Figure 7: part 1
+```{r}
+DE_modules<-read_csv("DEmodules.csv", col_names = FALSE)
+
+
+
+
+
+
+#Create Dataframe with mean expression per neuron type for the modules
+#piece of old code, improve this if time
+#Change the module names from the CDS
+#modulename<- paste0("Module ",1:198)
+k<-levels(as.factor(neurons$Neuron.type))
+m<- matrix(0, ncol = 120, nrow = 198)
+m<- as.data.frame(m)
+Sample<- as.data.frame(pData(cds))
+Sample$pos<- c(1:52412)
+
+for (i in 1:length(k)){
+  var<-Sample%>%  filter(Neuron.type==k[i])%>%dplyr::select(pos) #Filter the neuron_type, and select positio
+  M<- cds[,var$pos]
+  norm_expr<- rowMeans(exprs(M))   #collapse all samples to 1 type
+ #normalize per neuron type
+  m[,i]=norm_expr
+}
+#m is a dataframe with 198 gene modules (rows) and 120 neuron types (columns)
+rownames(m)<- rownames(cds)
+colnames(m)<- k
+
+
+#Only use DE modules
+m<-m[which(rownames(m)%in%DE_modules$X1),]
+
+
+
+
+
+#Cap the expression at 5 for visual reasons 
+m<- as.matrix(m)
+m[m<0]<- 0
+m[m>5]<-5
+
+
+#Cluster neuron types
+m<-cluster_matrix(m,dim="col",method="single",dist="euclidean" )
+#Remove negative values and values>5 
+
+
+#Dendrogram for the y-axis (neurons). This is for plot b
+dendro<- as.dendrogram(hclust(d=dist(t(m)), method="single"))
+dendro.plot<- ggdendrogram(data=dendro, rotate=TRUE)
+dendro.plot<-dendro.plot+theme(axis.text.y=element_text(size=6), axis.text.x =element_blank())
+
+
+
+
+#Order gene modules based on high expression so that it orders nicely on the diagonal
+m<- t(m)
+source("functions/other_functions/swap_function.R")
+for (i in 1:ncol(m)){
+  ind<-which.max(m[i,i:ncol(m)])+(i-1)
+  m<- swappy(m,i,ind)
+    
+}
+m<- t(m)
+
+
+#Required for ggplot object
+DE_x<- melt(m)
+
+
+```
+
+#Plots plus ordering
+```{r}
+#Order neuron types for ggplot (this has to be done manually)
+order<- order.dendrogram(dendro)
+# GGplot requires you to specify the order of the factor; otherwise it just orders alphabetically
+DE_x$Var2<- factor(x=DE_x$Var2, levels=colnames(m)[order], order=TRUE)
+DE_x$Var1<- factor(x=DE_x$Var1, levels=rownames(m),order=TRUE)
+
+
+
+#Heatmap plot
+heatmap.plot<-ggplot()+
+  geom_tile(data=DE_x,mapping=aes(x=Var1, y=Var2, fill=value))+scale_fill_viridis_c(name="Mean expression")+
+  theme(legend.position="right",axis.text.x = element_text(size=8,angle = 45, vjust = 1, hjust = 1),axis.text.y = element_text(size=8),axis.title.x=element_blank(), axis.title.y = element_blank(), legend.title = element_text("log(Mean expression)"))+labs(tag="A")
+
+
+
+
+#Arrange plots
+grid.arrange(heatmap.plot, dendro.plot, nrow=1,layout_matrix=rbind(c(1,1,1,1,2)))
+
+```
+
+#Thesis examples  figure 7A
+```{r}
+
+DE_modules<-read_csv("DEmodules.csv", col_names = FALSE)
+#These neuron types are further explored in thesis so we subset it
+
+neurons_of_interest<- c("ADE","PDE","CEP","ALM_PLM_PVM","FLP",
+                        "AVM","PVD","PLN?","ALN?","AIA","AIB",
+                        "AIY","AIZ","AFD","AWC_ON","AWC_OFF",
+                        "SIA","AVB","PQR","AQR","URX","AUA",
+                        "RME_DV","RME_LR", "VD_DD", "AVK","DVA","ASEL","ASER",
+                        "VC_1-3,6","VC_4_5","AVL","DVB","I4",
+                        "I5","I6", "MI","M2","M3","M5","MC",
+                        "RID","AVD","RMG","PHA","PHB","ASH","SIB")
+
+#Again, create 198*120 matrix of neuron types and their average expression 
+m<- matrix(0, ncol = 120, nrow = 198)
+m<- as.data.frame(m)
+Sample<- as.data.frame(pData(cds))
+Sample$pos<- c(1:52412)
+k<-levels(as.factor(neurons$Neuron.type))
+for (i in 1:length(k)){
+  var<-Sample%>%  filter(Neuron.type==k[i])%>%dplyr::select(pos) #Filter the neuron_type, and select positio
+  M<- cds[,var$pos]
+  norm_expr<- rowMeans(exprs(M))   #collapse all samples to 1 type
+ #normalize per neuron type
+  m[,i]=norm_expr
+}
+
+#m is a dataframe with 198 gene modules (rows) and 120 neuron types (columns)
+rownames(m)<- rownames(cds)
+colnames(m)<- k
+
+#Subset the neurons of interest
+m<-m[,which(colnames(m) %in% neurons_of_interest)]
+
+#ONly DE modules
+m<-m[which(rownames(m)%in%DE_modules$X1),]
+#cluster neurons based on expression levels
+m<-cluster_matrix(as.matrix(m),dim="col",method="single",dist="euclidean" )
+
+
+#Dendogram for plot B
+dendro<- as.dendrogram(hclust(d=dist(t(m)),method="single"))
+dendro.plot<- ggdendrogram(data=dendro, rotate=TRUE)
+dendro.plot<-dendro.plot+theme(axis.text.y=element_text(size=8), axis.text.x =element_blank())
+
+#Cap expression at 5 for nice visualization
+m<- as.matrix(m)
+m[m<0]<- 0
+m[m>5]<-5
+m<- t(m)
+
+source("functions/other_functions/swap_function.R") #Apparantly R has no column swapping function
+for (i in 1:nrow(m)){
+  ind<-which.max(m[i,i:ncol(m)])+(i-1)
+  m<- swappy(m,i,ind)
+}
+m<- t(m)
+
+#required for ggplot
+DE_x<-melt(m)
+DE_x$Var1<- factor(x=DE_x$Var1, levels=rownames(m), order=TRUE)
+DE_x$Var2<- factor(x=DE_x$Var2, levels=colnames(m), order=TRUE)
+
+
+#Heatmap
+heatmap.plot<-ggplot()+
+  geom_tile(data=DE_x,mapping=aes(x=Var1, y=Var2, fill=value))+scale_fill_viridis_c(name="Mean expression")+
+  theme(legend.position="right",axis.text.x = element_text(size=8,angle = 45, vjust = 1, hjust = 1),axis.text.y = element_text(size=8),axis.title.x=element_blank(), axis.title.y = element_blank(), legend.title = element_text("log(Mean expression)"))+labs(tag="A")
+
+#dendro plot
+dendro.plot<-dendro.plot+labs(tag="B")
+
+
+
+#arrange plots
+grid.arrange(heatmap.plot,dendro.plot, nrow=1, layout_matrix=rbind(c(1,1,1,1, 2)))
+```
+
+
+#How is the connectedness of the DE compared to the not DE modules? (prior to figure 7)
+```{r}
+# Are DE modules signficinalty higher in connectedness than not DE modules?
+
+
+#make two groups
+all_modules<- rownames(cds)
+not_DE<- setdiff(all_modules, DE_modules)
+
+#load connectedness scores
+setwd("D:/Internship AMOLF/Python")
+connectedness<-read_delim("Clustering_Coherency_scores/Threshold0.15/edge_score150.txt", delim="\t", col_names = FALSE)
+colnames(connectedness)<- c("Module","Connectedness")
+connectedness$Module<-gsub(".txt","",connectedness$Module)
+
+
+#create groups
+c_de<-connectedness%>%
+  filter(Module%in%DE_modules)
+c_de$Connectedness
+c_de<- c(c_de$Connectedness, rep(0, 76-length(c_de$Connectedness)))
+
+
+
+#create groups
+c_nde<-connectedness%>%
+  filter(Module%in%not_DE)
+c_nde<-c(c_nde$Connectedness, rep(0, 122-length(c_nde$Connectedness)))
+
+mean(c(c_nde,c_de))
+mean(c_de)*100
+mean(c_nde)*100
+
+newdf<- data.frame(connectedness=c(c_nde,c_de))
+newdf$treat<- c(rep("NDE",66),rep("DE",132))
+ggplot(newdf)+ geom_boxplot(mapping=aes(x=treat,y=connectedness))
+
+
+
+#Not significant
+t.test(c_de,c_nde)
+```
+
+#Top markers
+```{r}
+#Not used in thesis: we explored whether to use partition (created by PAGA algorithm) for identifying gene modules and also use it to further delve into these partitions by subsetting parts of the UMAP and further look into Differentially expressed modules. We eventually didn't pursue this step.
+
+
+library(monocle3)
+
+#SUBSET PARTITIONS
+cds2<- choose_cells(cds)
+
+plot_cells(cds2, color_cells_by="partition")
+plot_cells(cds, genes="Sheet13")
+
+#Learn_graph:
+?graph_test
+pr_graph_test_res <- graph_test(cds2, neighbor_graph="knn", cores=1)
+
+pr_deg_ids <- row.names(subset(pr_graph_test_res, morans_I > 0.01 & q_value < 0.05 & size>10))
+plot_cells(cds2,genes="Sheet11")
+
+#Or fit a model
+gene_fits <- fit_models(cds2, model_formula_str = "~cluster")
+fit_coefs <- coefficient_table(gene_fits)
+emb_time_terms <- fit_coefs %>% filter(term != "(Intercept)")
+
+x<-emb_time_terms %>% filter (q_value < 0.05) 
+
+
+x<-x$gene_short_name
+x<-unique(x)
+
+plot_genes_by_group(cds2,x,  group_cells_by="cluster", max.size=4,ordering_type = "maximal_on_diag", norm_method=NULL, pseudocount = 1, axis_order="group_marker")+ylab("Module")+ theme(axis.text = element_text(size = 5)) 
+
+plot_cells(cds2, color_cells_by = "Neuron.type")
+plot_cells(cds2, genes=c("Sheet35","Sheet30","Sheet72","Sheet62","Sheet18","Sheet36","Sheet124","Sheet12","Sheet40"))
+
+plot_cells(cds2,genes=c("Sheet28","Sheet83","Sheet20","Sheet22","Sheet66","Sheet51","Sheet56","Sheet6"))
+```
+
+# Plot markers 2 (manually identified)
+```{r}
+#Also old script belonging to plot markers
+
+#manually picked
+p1<-plot_genes_by_group(cds,list_of_sheets[c(51,33,5,56,6,13,
+                                         44,14,43,37,29,
+                                         27,2,16,25,3,15,
+                                         53,36,9,1,85,8,39,
+                                         70,46,41,7,81,22,26)],  group_cells_by="partition", max.size=4,ordering_type = "maximal_on_diag", norm_method=NULL, pseudocount = 1, axis_order="marker_group")
+
+p1<-p1+xlab("Partition")+ylab("Module")+labs(tag="B")
+
+
+
+
+setdiff(list_of_sheets[c(51,33,5,56,6,13,
+                                         44,14,43,37,29,
+                                         27,2,16,25,3,15,
+                                         53,36,9,1,85,8,39,
+                                         70,46,41,7,81,22,26)],DE_modules)
+
+library(gridExtra)
+grid.arrange(p3,p1)
+```
+
+```{r}
+
+cds2<- choose_cells(cds)
+?plot_cells
+plot_cells(cds2, color_cells_by="Neuron.type")
+
+plot_cells(cds2, genes="Sheet51",norm_method=NULL)
+
+source("functions/other_functions/Module_expression_analysis.R")
+Module_expressed_in(cds,7,3)
+Module_expressed_in(cds,81,3)
+Module_expressed_in(cds,22,3)
+Module_expressed_in(cds,26,3)
+Module_expressed_in(cds,8,3)
+Module_expressed_in(cds,39,3)
+Module_expressed_in(cds,70,3)
+Module_expressed_in(cds,46,3)
+Module_expressed_in(cds,41,3)
+```
+
+
+
+#Plots for github: Gene module profiles
+```{r}
+
+# Few functions for generating module profiles and neuron module profiles
+source("functions/other_functions/Module_expression_analysis.R")
+
+
+
+Module_expressed_in(cds,33,3) # This function identifies highly expressed modules defined by the threshold (3rd argument). Threshold is 3 for table 2 in thesis (by the normalization, this is 3 standard deviations from the mean).
+
+
+Neuron_expression(cds,"MC") #profiles of a neuron type (top 10 modules)
+Neuron_expression(cds,"MI")
+
+
+Module_Neuron_expression(cds, 17) #Expression of a gene module for all neuron types
+Module_Neuron_expression(cds, 133) 
+
+
+
+
+
+
+#Save plots for github
+for (i in 1:198){
+  p1<-Module_Neuron_expression(cds,i)
+  ggsave(filename=paste0("Plots_for_github/",i,".png"),
+         plot=p1,dpi="screen", width = 50, units="cm")
+}
+library(stringr)
+for (i in length(k)){
+  without_qm<- str_replace(k[1],"\\?","") #remove question mark, otherwise it doesnt save
+  p1<-Module_Neuron_expression(cds,i)
+  ggsave(filename=paste0("Plots_for_github/",k[i],".png"),
+         plot=p1,dpi="screen")
+}
+
+
+```
+
+
+#cluster purity
+```{r}
+#Cluster purity measure that was used together with ARI for evaluating cell clustering performance
+
+labels<- clusters(cds)
+compare_results<- data.frame(CenGEN_labels=as.factor(neurons$Neuron.type), CeNGEN_louvain=neurons$louvain_component, our_louvain=labels)
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+tryout<- compare_results%>%
+  group_by(CeNGEN_louvain)%>%
+  summarize(n=Mode(CenGEN_labels))%>%
+  ungroup()
+tryout2<- compare_results%>%
+  group_by(our_louvain)%>%
+  summarize(n=Mode(CenGEN_labels))%>%
+  ungroup()
+
+compare1<-left_join(compare_results, tryout, by="CeNGEN_louvain")
+compare2<-left_join(compare_results, tryout2, by="our_louvain")
+
+sum(compare2$CenGEN_label==compare2$n)/52412 #72% the same
+
+
+groups1<-compare1%>%
+  group_by(CeNGEN_louvain)%>%
+  summarise(perc= sum(CenGEN_labels==n)/n())
+
+groups2<-compare2%>%
+  group_by(our_louvain)%>%
+  summarise(perc= sum(CenGEN_labels==n)/n())
+```
+
+

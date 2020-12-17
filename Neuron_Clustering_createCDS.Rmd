@@ -1,0 +1,192 @@
+---
+title: "Neurons_Clustering_V3"
+author: "Paul van Lent"
+date: "19 October 2020"
+output: html_document
+---
+
+
+# load packages
+```{r setup, include=FALSE}
+#library(monocle)
+library(tidyverse)
+#install.packages("backports")
+library(readxl)
+library(Rtsne)
+library(factoextra)
+library(cluster)
+library(robustbase)
+#install.packages("R.matlab")
+library(R.matlab)
+library(pracma)
+library(zipfR)
+library(BiocVersion)
+
+
+#install.packages("sctransform")
+#library(sctransform)
+#install.packages("Seurat")
+#library(Seurat)
+#remotes::install_github("ChristophH/sctransform@develop")
+
+library(sctransform)
+
+
+#install.packages("propagate")
+library(propagate)
+```
+
+
+#load file, normalize, create distance matrix, save
+```{r}
+
+#Load CeNGEN dataset
+neurons<- readRDS("data/neuron_cds.rds")
+library(proxyC)
+
+
+#Remove genes with virtually no expression
+expressed_genes<-which(rowSums(exprs(neurons)>0)>5)
+neurons<- neurons[expressed_genes,]
+
+#Normalize by sctransform
+Normalized_counts<-sctransform::vst(exprs(neurons), method="nb_fast", min_cells=5, n_genes=500)$y
+#saveRDS(Normalized_counts, "Normalized_counts.rds")
+
+
+#This step takes a lot of time (roughly 2.5 hours) so I saved this in a RDS form so that we dont have to do this again
+dist_matrix<- bigcor(t(Normalized_counts), fun="cor")
+
+
+#Normalization takes quite long, so save this if you do not want to wait again
+#saveRDS(dist_matrix, "sct_transformed_data.rds")
+
+
+
+#This is necessary because the output of bigcor is a list, and we'd like a matrix
+dist_matrix1<- matrix(NaN, nrow=nrow(neurons), ncol=nrow(neurons))
+temp=1
+for (i in 1:nrow(neurons)){
+  temp2= temp+ nrow(neurons)-1
+  rowi= dist_matrix[temp:temp2]
+  dist_matrix1[i,]<- rowi
+  temp=temp2+1
+}
+
+dist_matrix1<- acos(dist_matrix1)/pi
+dist_matrix1[is.nan(dist_matrix1)]<-0
+dist_matrix1<-round(dist_matrix1, 6) #rond af tot 5 decimalen
+
+write.csv(dist_matrix1,"Neuron_clustering_scttransform20102020.csv")
+```
+
+---MATLAB
+---MATLAB
+---MATLAB
+
+
+```{r}
+
+#Load functions
+source("functions/other_functions/R_functions.R") 
+filename<- "results/Neurons_sct/Cluster_Neurons_sctransform_3sd.xlsx"
+
+#Some processing functions
+feature_vector<-feature_vector(filename) #loads vector of excel sheet indexes of genes
+list_of_sheets<- excel_sheets(filename)
+vec_list<- vec_list(feature_vector) #all genes from the excel sheet
+index<- index(feature_vector) #Indices of the genes for subsetting the Average Gene Module Dataframe.
+
+#Genes from modules
+Normalized_counts<-readRDS("sct_transform/Normalized_counts.rds")
+dim(Normalized_counts)
+Normalized_counts<- Normalized_counts[vec_list,]
+
+
+
+#Create average gene module expression matrix
+AGM_expression<- matrix(NaN ,nrow=198, ncol=ncol(neurons))
+
+for (i in 1: length(index)){
+  sub<-Normalized_counts[index[[i]],]
+  avg<- colMeans(sub)
+  AGM_expression[i,]<-avg
+}
+rownames(AGM_expression)<- list_of_sheets
+
+#saveRDS(AGM_expression, "AGM_expression_scttransform.rds")
+
+```
+
+
+
+#Create Cell_Data_Set for further analysis in monocle 3
+```{r}
+#create new CellDataSet
+AGM_expression<-readRDS("sct_transform/AGM_expression_scttransform.rds")
+
+
+#Expression matrix
+expr_matrix<- AGM_expression
+colnames(expr_matrix)<-colnames(neurons)
+rownames(expr_matrix)<- list_of_sheets
+
+#Create gene data (size of the module)
+size=c()
+for (i in 1:length(feature_vector)){
+  size=c(size, length(index[[i]]))
+}
+
+module_data<- data.frame(size=size)
+rownames(module_data)<-list_of_sheets
+module_data$gene_short_name<- rownames(module_data)
+
+#Sample data (maybe take the pData from CeNGEN)
+sample_data<- data.frame(Sample=neurons$Sample)
+rownames(sample_data)<-colnames(neurons)
+sample_data$Neuron.type<- neurons$Neuron.type
+sample_data$Experiment<-neurons$Experiment
+sample_data$outliers<-neurons$outlier
+
+sum(is.na(sample_data$outliers))
+
+sample_data[1:10,1:4]
+#Make monocle3 type cell_data_set
+library(monocle3)
+
+cds <- monocle3::new_cell_data_set(expr_matrix,
+                         cell_metadata= sample_data, gene_metadata=module_data)
+
+
+
+saveRDS(cds, "cds_sct.rds")
+```
+
+The steps in Neuron_Clustering_Downstream1.rmd are all done with the cds_sct.rds
+
+
+
+# Loading the modules into text files for fast analysis in python or wormbase intermine etc..
+```{r} 
+#This step was loads the gene module into .txt files for further analysis in python and for wormbase. 
+
+
+genes<- fData(neurons)
+
+f_vec<- feature_vector(filename)
+l_sheets<- excel_sheets(filename)
+#This writes each module to a .txt file, that can be used for enrichment analysis.
+for(i in 1:length(l_sheets)){
+  GENE_ID<- genes %>%
+    mutate(pos=c(1:nrow(genes)))%>% #Add a position so that we can easily filter for the modules
+    filter(pos %in% f_vec[i]$...1)
+  GENE_ID<- GENE_ID$gene_short_name
+    #Extract Genes for Enrichment analysis.
+  str<- paste0("results/Subset/",l_sheets[i],".txt")
+  write_lines(GENE_ID, str, append=TRUE)
+}
+
+```
+
+
+
