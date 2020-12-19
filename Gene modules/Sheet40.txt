@@ -1,0 +1,8 @@
+cpn-3
+pat-10
+unc-15
+lev-11
+mlc-3
+T25F10.6
+tag-18
+mlc-1
